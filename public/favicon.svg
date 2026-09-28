@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- 4×4 mosaic in the dusk palette: bands arch like the parabolic grating -->
+  <rect width="32" height="32" rx="6" fill="#0a040c"/>
+  <g transform="translate(1.5 1.5)">
+    <rect x="0"  y="0"  width="6.5" height="6.5" rx="1" fill="#d42a6f"/>
+    <rect x="7.5" y="0"  width="6.5" height="6.5" rx="1" fill="#ff8f3a"/>
+    <rect x="15" y="0"  width="6.5" height="6.5" rx="1" fill="#ff8f3a"/>
+    <rect x="22.5" y="0"  width="6.5" height="6.5" rx="1" fill="#d42a6f"/>
+
+    <rect x="0"  y="7.5" width="6.5" height="6.5" rx="1" fill="#4b2fd6"/>
+    <rect x="7.5" y="7.5" width="6.5" height="6.5" rx="1" fill="#d42a6f"/>
+    <rect x="15" y="7.5" width="6.5" height="6.5" rx="1" fill="#d42a6f"/>
+    <rect x="22.5" y="7.5" width="6.5" height="6.5" rx="1" fill="#4b2fd6"/>
+
+    <rect x="0"  y="15" width="6.5" height="6.5" rx="1" fill="#24133a"/>
+    <rect x="7.5" y="15" width="6.5" height="6.5" rx="1" fill="#4b2fd6"/>
+    <rect x="15" y="15" width="6.5" height="6.5" rx="1" fill="#4b2fd6"/>
+    <rect x="22.5" y="15" width="6.5" height="6.5" rx="1" fill="#24133a"/>
+
+    <rect x="0"  y="22.5" width="6.5" height="6.5" rx="1" fill="#ff8f3a"/>
+    <rect x="7.5" y="22.5" width="6.5" height="6.5" rx="1" fill="#24133a"/>
+    <rect x="15" y="22.5" width="6.5" height="6.5" rx="1" fill="#24133a"/>
+    <rect x="22.5" y="22.5" width="6.5" height="6.5" rx="1" fill="#ff8f3a"/>
+  </g>
+</svg>

@@ -137,11 +137,13 @@ uniform float uCurve;     // curvature difference of grating B
 uniform float uPhase;     // phase slide of grating B
 uniform float uShift;     // phase shift of grating A inside the letters
 uniform float uReveal;
+uniform vec3  uBg;                // palette background
+uniform vec3  uInk0, uInk1, uInk2; // one ink per dispersed channel
+uniform float uDisp;         // per-channel wavelength spread
 
 const float TAU = 6.2831853;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-vec3 palette(float t) { return 0.5 + 0.5 * cos(TAU * (t + vec3(0.0, 0.33, 0.67))); }
 mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
 
 void main() {
@@ -161,8 +163,8 @@ void main() {
   vec2  pb = rot(uAngle) * (p - uOffset);
   float fb = pb.y + (0.4 + uCurve) * pb.x * pb.x;
 
-  // polychrome: each channel diffracts at a slightly different wavelength
-  vec3 lam = vec3(1.0, 1.085, 1.18);
+  // each channel diffracts at a slightly different wavelength
+  vec3 lam = vec3(1.0, 1.0 + uDisp, 1.0 + 2.0 * uDisp);
   vec3 phA = uK * lam * fa + m * uShift;
   vec3 phB = uK * lam * fb + uPhase;
 
@@ -171,12 +173,13 @@ void main() {
   vec3 fine = gA * gB;                          // overlaid transparencies
   vec3 beat = 0.5 + 0.5 * cos(phA - phB);       // what the eye integrates
 
-  vec3 col = fine * (0.3 + 1.3 * beat) * 1.6;
+  vec3 lum = fine * (0.3 + 1.3 * beat) * 1.6;
 
-  // colour wash that drifts slowly across the field
-  vec3 hue = palette(0.35 * p.x - 0.22 * p.y + 0.12 * length(p) + 0.018 * uTime);
-  col *= mix(vec3(1.0), 1.5 * hue, 0.6);
-  col += 0.035 * hue * (0.4 + 0.6 * beat);
+  // three inks, one per channel: where the channels agree the inks stack toward light,
+  // where dispersion pulls them apart each ink shows on its own
+  vec3 ink = uInk0 * lum.r + uInk1 * lum.g + uInk2 * lum.b;
+  float drift = 1.0 + 0.12 * sin(1.7 * p.x - 1.1 * p.y + 0.05 * uTime);
+  vec3 col = uBg + (1.0 - exp(-ink * 0.65 * drift));
 
   // --- tesserae: per-tile variance, bevel, grout ---
   float j = hash(cell);
@@ -184,7 +187,7 @@ void main() {
   col *= 1.0 + 0.16 * (local.y - local.x);
   float edge  = max(abs(local.x), abs(local.y));
   float grout = 1.0 - smoothstep(0.5 - 1.3 / uTile, 0.5 - 0.25 / uTile, edge);
-  col = mix(vec3(0.018, 0.017, 0.024), col, grout);
+  col = mix(uBg * 0.6, col, grout);
 
   // vignette
   vec2 q = (frag - 0.5 * uRes) / uRes;
@@ -200,6 +203,23 @@ void main() {
       const TEXT = "LUCAS IS HUMAN";
       const FONT = '"Archivo Black", "Arial Black", Impact, sans-serif';
       const PERIOD_TILES = 5.0;   // grating period at centre, in mosaic tiles
+      // "time" blends night → dawn → day → dusk with the local clock, "random" picks one per
+      // load, or name a palette. Override with ?palette=<mode|name>; test times with ?hour=<0-24>.
+      const PALETTE = "time";
+      const DISPERSION = 0.07;    // how far the three inks split apart in the fringes
+      // Inks are ordered base, accent, light. The four clock palettes keep similar hues in each
+      // slot so the cross-fades between them stay short trips around the colour wheel.
+      const PALETTES = {          // background, then one ink per channel
+        night: ["#03040b", "#2a45d8", "#9a7cff", "#ffcf9e"],
+        dawn: ["#0b0609", "#8a6cff", "#ff5e5b", "#ffb86b"],
+        day: ["#050908", "#16a39a", "#ff5a2e", "#f1e4c8"],
+        dusk: ["#0a040c", "#4b2fd6", "#d42a6f", "#ff8f3a"],
+        ember: ["#0a0507", "#b8321f", "#ff8a3d", "#ffd08a"],
+        ocean: ["#03080f", "#1d5fa0", "#2fb8c4", "#a8f0e6"],
+        violet: ["#08050f", "#6d2bb8", "#d64fa0", "#ffa3cf"],
+        acid: ["#060806", "#3f6b12", "#b8e62e", "#f0ff9a"],
+      };
+      const DAY = [[0, "night"], [6, "dawn"], [12, "day"], [18, "dusk"], [24, "night"]];
 
       const canvas = document.getElementById("c");
       const hint = document.getElementById("hint");
@@ -236,8 +256,73 @@ void main() {
 
       const U = {};
       ["uRes", "uTime", "uTile", "uMask", "uMaskRes", "uK", "uSpin",
-        "uAngle", "uOffset", "uCurve", "uPhase", "uShift", "uReveal"]
+        "uAngle", "uOffset", "uCurve", "uPhase", "uShift", "uReveal", "uBg", "uInk0", "uInk1", "uInk2", "uDisp"]
         .forEach(n => U[n] = gl.getUniformLocation(prog, n));
+
+      const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+      const PAL_KEYS = ["uBg", "uInk0", "uInk1", "uInk2"];
+      const setPalette = cols => PAL_KEYS.forEach((n, i) => gl.uniform3fv(U[n], cols[i]));
+      const paletteRGB = name => PALETTES[name].map(hex);
+
+      const TAU = Math.PI * 2;
+      // Blend in OKLCH so a cross-fade turns hue around the wheel instead of passing through grey.
+      const toLin = c => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+      const toSrgb = c => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
+      function oklch([r, g, b]) {
+        [r, g, b] = [r, g, b].map(toLin);
+        const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+        const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+        const q = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+        const L = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * q;
+        const A = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * q;
+        const B = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * q;
+        return [L, Math.hypot(A, B), Math.atan2(B, A)];
+      }
+      function fromOklch([L, C, h]) {
+        const A = C * Math.cos(h), B = C * Math.sin(h);
+        const l = (L + 0.3963377774 * A + 0.2158037573 * B) ** 3;
+        const m = (L - 0.1055613458 * A - 0.0638541728 * B) ** 3;
+        const q = (L - 0.0894841775 * A - 1.291485548 * B) ** 3;
+        return [
+          4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * q,
+          -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * q,
+          -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * q,
+        ].map(c => Math.min(1, Math.max(0, toSrgb(Math.max(0, c)))));
+      }
+      function lerpOklch(a, b, k) {
+        const [L0, C0, h0] = oklch(a), [L1, C1, h1] = oklch(b);
+        let dh = h1 - h0;
+        if (dh > Math.PI) dh -= TAU;
+        if (dh < -Math.PI) dh += TAU;
+        return fromOklch([L0 + (L1 - L0) * k, C0 + (C1 - C0) * k, h0 + dh * k]);
+      }
+
+      // Hold each key palette for a few hours, cross-fade over the middle of each gap.
+      function paletteAt(hour) {
+        let i = 0;
+        while (DAY[i + 1][0] <= hour) i++;
+        const [h0, a] = DAY[i], [h1, b] = DAY[i + 1];
+        const f = (hour - h0) / (h1 - h0);
+        const u = Math.min(1, Math.max(0, (f - 0.35) / 0.3));
+        const k = u * u * (3 - 2 * u);
+        const A = paletteRGB(a), B = paletteRGB(b);
+        return A.map((c, j) => lerpOklch(c, B[j], k));
+      }
+
+      const mode = params.get("palette") || PALETTE;
+      const fixedHour = params.has("hour") ? parseFloat(params.get("hour")) % 24 : null;
+      const localHour = () => {
+        const d = new Date();
+        return d.getHours() + d.getMinutes() / 60;
+      };
+      const followClock = !(mode in PALETTES) && mode !== "random";
+      if (mode in PALETTES) setPalette(paletteRGB(mode));
+      else if (mode === "random") {
+        const names = Object.keys(PALETTES);
+        setPalette(paletteRGB(names[Math.floor(Math.random() * names.length)]));
+      } else setPalette(paletteAt(fixedHour ?? localHour()));
+      gl.uniform1f(U.uDisp, DISPERSION);
+      if (followClock && fixedHour === null) setInterval(() => setPalette(paletteAt(localHour())), 60000);
 
       const tex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -329,7 +414,7 @@ void main() {
       const s = {
         mx: 0, my: 0, tmx: 0, tmy: 0,
         energy: 0, reveal: 0,
-        scroll: 0, scrollS: 0, phase: 0,
+        scroll: 0, scrollS: 0, phase: 0, twist: 0,
         px: null, py: null, touched: false,
       };
       const bump = e => { s.energy = Math.min(1.8, s.energy + e); s.touched = true; };
@@ -345,19 +430,19 @@ void main() {
       addEventListener("wheel", e => {
         const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
         s.scroll += d;
+        s.twist = Math.max(-0.6, Math.min(0.6, s.twist + d * 0.0012));
         bump(Math.min(Math.abs(d), 160) / 520);
       }, { passive: true });
       addEventListener("keydown", e => {
         const k = { ArrowLeft: [-0.12, 0], ArrowRight: [0.12, 0], ArrowUp: [0, 0.12], ArrowDown: [0, -0.12] }[e.key];
         if (k) { s.tmx = Math.max(-1, Math.min(1, s.tmx + k[0])); s.tmy = Math.max(-1, Math.min(1, s.tmy + k[1])); bump(0.2); }
-        if (e.key === " " || e.key === "PageDown" || e.key === "PageUp") { s.scroll += e.key === "PageUp" ? -240 : 240; bump(0.3); }
+        if (e.key === " " || e.key === "PageDown" || e.key === "PageUp") { const d = e.key === "PageUp" ? -240 : 240; s.scroll += d; s.twist = Math.max(-0.6, Math.min(0.6, s.twist + d * 0.0012)); bump(0.3); }
       });
 
       const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
       const drift = reduced ? 0.2 : 1;
       const mix = (a, b, t) => a + (b - a) * t;
       const smooth = t => t * t * (3 - 2 * t);
-      const TAU = Math.PI * 2;
 
       // ---------- frame loop ----------
       const t0 = performance.now();
@@ -372,6 +457,7 @@ void main() {
         s.my += (s.tmy - s.my) * ease;
         const dScroll = (s.scroll - s.scrollS) * (1 - Math.exp(-dt * 5));
         s.scrollS += dScroll;
+        s.twist *= Math.exp(-dt * 1.6);   // scroll twists the gratings apart; they spring back into register
 
         s.energy *= Math.exp(-dt * 0.75);
         const target = smooth(Math.min(1, s.energy));
@@ -386,7 +472,7 @@ void main() {
           const p0 = still.t * 0.35;
           phase = mix(p0, Math.round(p0 / TAU) * TAU, r);
         } else {
-          s.phase += (dt * 0.35 * drift + dScroll * 0.006) * (1 - r);
+          s.phase += dt * 0.35 * drift * (1 - r);
           s.phase += (Math.round(s.phase / TAU) * TAU - s.phase) * r * (1 - Math.exp(-dt * 3));
           phase = s.phase;
         }
@@ -396,8 +482,8 @@ void main() {
         // At rest the two gratings are misaligned: dense fringes hide the letters.
         // Motion pulls them into register, the beat opens up, and the text inverts out.
         gl.uniform1f(U.uTime, t);
-        gl.uniform1f(U.uSpin, 0.035 * s.mx - 0.02 * s.my + 0.01 * Math.sin(t * 0.07));
-        gl.uniform1f(U.uAngle, mix(0.19, 0.0, r) + 0.03 * s.mx + 0.004 * Math.sin(t * 0.11));
+        gl.uniform1f(U.uSpin, s.scrollS * 0.0008 + 0.035 * s.mx - 0.02 * s.my + 0.01 * Math.sin(t * 0.07));
+        gl.uniform1f(U.uAngle, mix(0.19, 0.0, r) + s.twist + 0.03 * s.mx + 0.004 * Math.sin(t * 0.11));
         gl.uniform1f(U.uCurve, mix(0.15, 0.0, r) + 0.03 * s.my);
         // Horizontal offset only: a vertical one is a uniform phase that would fade the letters.
         gl.uniform2f(U.uOffset, 0.025 * s.mx, 0.0);

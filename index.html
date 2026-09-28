@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Lucas J. Shuman</title>
+  <!-- TODO: replace placeholder copy and https://example.com with the real domain -->
+  <meta name="description" content="Lucas J. Shuman — placeholder description.">
+  <meta name="author" content="Lucas J. Shuman">
+  <meta name="theme-color" content="#07070a">
+  <meta name="color-scheme" content="dark">
+  <link rel="canonical" href="https://example.com/">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Lucas J. Shuman">
+  <meta property="og:title" content="Lucas J. Shuman">
+  <meta property="og:description" content="Placeholder description.">
+  <meta property="og:url" content="https://example.com/">
+  <meta property="og:image" content="https://example.com/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Blocky lettering emerging from a polychrome moiré mosaic">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Lucas J. Shuman">
+  <meta name="twitter:description" content="Placeholder description.">
+  <meta name="twitter:image" content="https://example.com/og.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=JetBrains+Mono:wght@400&display=swap"
+    rel="stylesheet">
+  <style>
+    :root {
+      --bg: #07070a;
+      --ink: #f4f1ea;
+      --dim: rgba(244, 241, 234, 0.55);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--ink);
+      overflow: hidden;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    canvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: crosshair;
+    }
+
+    h1 {
+      /* Visually hidden; the name is revealed by the moiré, not by markup. */
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+
+    .hint {
+      position: fixed;
+      left: 16px;
+      bottom: 16px;
+      font: 400 11px/1.2 "JetBrains Mono", ui-monospace, Menlo, monospace;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--dim);
+      pointer-events: none;
+      transition: opacity 1.6s ease;
+      mix-blend-mode: difference;
+    }
+
+    .hint.gone {
+      opacity: 0;
+    }
+
+    /* Fallback when WebGL is unavailable. */
+    body.nogl h1 {
+      position: fixed;
+      inset: 0;
+      width: auto;
+      height: auto;
+      clip: auto;
+      display: grid;
+      place-items: center;
+      margin: 0;
+      font: 400 clamp(40px, 11vw, 180px)/0.9 "Archivo Black", "Arial Black", sans-serif;
+      text-transform: uppercase;
+      text-align: center;
+      white-space: normal;
+    }
+
+    body.nogl .hint {
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Lucas J. Shuman</h1>
+  <canvas id="c" aria-hidden="true"></canvas>
+  <div class="hint" id="hint">move · scroll · reveal</div>
+
+  <script id="vs" type="x-shader/x-vertex">
+attribute vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+  <script id="fs" type="x-shader/x-fragment">
+precision highp float;
+
+uniform vec2  uRes;       // canvas size, device px
+uniform float uTime;
+uniform float uTile;      // mosaic tile size, device px
+uniform sampler2D uMask;  // text mask, one texel per tile
+uniform vec2  uMaskRes;
+uniform float uK;         // grating wavenumber
+uniform float uSpin;      // whole-field rotation
+uniform float uAngle;     // rotation of grating B relative to A
+uniform vec2  uOffset;    // translation of grating B
+uniform float uCurve;     // curvature difference of grating B
+uniform float uPhase;     // phase slide of grating B
+uniform float uShift;     // phase shift of grating A inside the letters
+uniform float uReveal;
+
+const float TAU = 6.2831853;
+
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+vec3 palette(float t) { return 0.5 + 0.5 * cos(TAU * (t + vec3(0.0, 0.33, 0.67))); }
+mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+void main() {
+  // --- mosaic: every tile samples the field once, at its centre ---
+  vec2 frag  = gl_FragCoord.xy;
+  vec2 cell  = floor(frag / uTile);
+  vec2 local = fract(frag / uTile) - 0.5;
+  vec2 c     = (cell + 0.5) * uTile;
+  vec2 p     = rot(uSpin) * ((c - 0.5 * uRes) / uRes.y);
+
+  // --- hidden text: encoded as a phase shift in grating A ---
+  vec2 muv = (cell + 0.5) / uMaskRes;
+  float m  = step(0.5, texture2D(uMask, muv).r);
+
+  // --- two parabolic gratings: lines follow y = -a·x² ---
+  float fa = p.y + 0.4 * p.x * p.x;
+  vec2  pb = rot(uAngle) * (p - uOffset);
+  float fb = pb.y + (0.4 + uCurve) * pb.x * pb.x;
+
+  // polychrome: each channel diffracts at a slightly different wavelength
+  vec3 lam = vec3(1.0, 1.085, 1.18);
+  vec3 phA = uK * lam * fa + m * uShift;
+  vec3 phB = uK * lam * fb + uPhase;
+
+  vec3 gA = 0.5 + 0.5 * cos(phA);
+  vec3 gB = 0.5 + 0.5 * cos(phB);
+  vec3 fine = gA * gB;                          // overlaid transparencies
+  vec3 beat = 0.5 + 0.5 * cos(phA - phB);       // what the eye integrates
+
+  vec3 col = fine * (0.3 + 1.3 * beat) * 1.6;
+
+  // colour wash that drifts slowly across the field
+  vec3 hue = palette(0.35 * p.x - 0.22 * p.y + 0.12 * length(p) + 0.018 * uTime);
+  col *= mix(vec3(1.0), 1.5 * hue, 0.6);
+  col += 0.035 * hue * (0.4 + 0.6 * beat);
+
+  // --- tesserae: per-tile variance, bevel, grout ---
+  float j = hash(cell);
+  col *= 0.86 + 0.28 * j;
+  col *= 1.0 + 0.16 * (local.y - local.x);
+  float edge  = max(abs(local.x), abs(local.y));
+  float grout = 1.0 - smoothstep(0.5 - 1.3 / uTile, 0.5 - 0.25 / uTile, edge);
+  col = mix(vec3(0.018, 0.017, 0.024), col, grout);
+
+  // vignette
+  vec2 q = (frag - 0.5 * uRes) / uRes;
+  col *= 1.0 - 0.55 * dot(q, q);
+
+  gl_FragColor = vec4(pow(max(col, 0.0), vec3(0.88)), 1.0);
+}
+</script>
+
+  <script>
+    (() => {
+      // ---------- configuration ----------
+      const TEXT = "LUCAS IS HUMAN";
+      const FONT = '"Archivo Black", "Arial Black", Impact, sans-serif';
+      const PERIOD_TILES = 5.0;   // grating period at centre, in mosaic tiles
+
+      const canvas = document.getElementById("c");
+      const hint = document.getElementById("hint");
+      // ?still=<reveal 0..1>&t=<seconds>[&tile=<css px>] freezes one frame (used to render og.png).
+      const params = new URLSearchParams(location.search);
+      const still = params.has("still")
+        ? { r: parseFloat(params.get("still")) || 0, t: parseFloat(params.get("t")) || 0, tile: parseFloat(params.get("tile")) || 0 }
+        : null;
+      if (still) hint.style.display = "none";
+      const gl = canvas.getContext("webgl", { antialias: false, alpha: false, preserveDrawingBuffer: false });
+      if (!gl) { document.body.classList.add("nogl"); return; }
+
+      // ---------- GL setup ----------
+      function compile(type, src) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+        return s;
+      }
+      const prog = gl.createProgram();
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, document.getElementById("vs").textContent));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById("fs").textContent));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+      gl.useProgram(prog);
+
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      const aPos = gl.getAttribLocation(prog, "aPos");
+      gl.enableVertexAttribArray(aPos);
+      gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+      const U = {};
+      ["uRes", "uTime", "uTile", "uMask", "uMaskRes", "uK", "uSpin",
+        "uAngle", "uOffset", "uCurve", "uPhase", "uShift", "uReveal"]
+        .forEach(n => U[n] = gl.getUniformLocation(prog, n));
+
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.uniform1i(U.uMask, 0);
+
+      // ---------- text mask (one pixel per mosaic tile → blocky letters) ----------
+      const mc = document.createElement("canvas");
+      const mctx = mc.getContext("2d", { willReadFrequently: false });
+
+      // Every way to break the words into contiguous lines.
+      function lineings(words) {
+        const out = [];
+        const n = words.length;
+        for (let mask = 0; mask < 1 << (n - 1); mask++) {
+          const lines = [];
+          let cur = [words[0]];
+          for (let i = 1; i < n; i++) {
+            if (mask & (1 << (i - 1))) { lines.push(cur.join(" ")); cur = [words[i]]; }
+            else cur.push(words[i]);
+          }
+          lines.push(cur.join(" "));
+          out.push(lines);
+        }
+        return out;
+      }
+
+      function buildMask(mw, mh) {
+        mc.width = mw;
+        mc.height = mh;
+        mctx.fillStyle = "#000";
+        mctx.fillRect(0, 0, mw, mh);
+
+        const LH = 0.86;   // line step, em (Archivo Black caps ≈ 0.72em)
+        const boxW = mw * 0.88, boxH = mh * 0.7;
+        mctx.font = `100px ${FONT}`;
+        try { mctx.letterSpacing = "2px"; } catch (_) {}
+
+        let best = null;
+        for (const lines of lineings(TEXT.split(/\s+/))) {
+          const wide = Math.max(...lines.map(l => mctx.measureText(l).width));
+          const size = Math.min((boxW / wide) * 100, boxH / (lines.length * LH));
+          if (!best || size > best.size) best = { lines, size };
+        }
+
+        const size = Math.floor(best.size);
+        mctx.font = `${size}px ${FONT}`;
+        try { mctx.letterSpacing = `${Math.round(size * 0.02)}px`; } catch (_) {}
+        mctx.fillStyle = "#fff";
+        mctx.textAlign = "center";
+        mctx.textBaseline = "middle";
+        const step = size * LH;
+        const y0 = mh / 2 - (step * (best.lines.length - 1)) / 2 + size * 0.04;
+        best.lines.forEach((l, i) => mctx.fillText(l, mw / 2, y0 + i * step));
+
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, mc);
+      }
+
+      // ---------- sizing ----------
+      let W = 0, H = 0, tile = 8;
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        W = Math.floor(innerWidth * dpr);
+        H = Math.floor(innerHeight * dpr);
+        canvas.width = W;
+        canvas.height = H;
+        gl.viewport(0, 0, W, H);
+        const tileCss = still && still.tile ? still.tile : Math.min(12, Math.max(5, Math.min(innerWidth, innerHeight) / 115));
+        tile = Math.max(3, Math.round(tileCss * dpr));
+        const mw = Math.ceil(W / tile), mh = Math.ceil(H / tile);
+        buildMask(mw, mh);
+        gl.uniform2f(U.uRes, W, H);
+        gl.uniform1f(U.uTile, tile);
+        gl.uniform2f(U.uMaskRes, mw, mh);
+        gl.uniform1f(U.uK, (Math.PI * 2 * (H / tile)) / PERIOD_TILES);
+      }
+      addEventListener("resize", resize);
+      resize();
+      if (document.fonts && document.fonts.load) {
+        document.fonts.load(`100px "Archivo Black"`).then(resize, () => {});
+      }
+
+      // ---------- input → motion energy ----------
+      const s = {
+        mx: 0, my: 0, tmx: 0, tmy: 0,
+        energy: 0, reveal: 0,
+        scroll: 0, scrollS: 0, phase: 0,
+        px: null, py: null, touched: false,
+      };
+      const bump = e => { s.energy = Math.min(1.8, s.energy + e); s.touched = true; };
+
+      addEventListener("pointermove", e => {
+        s.tmx = (e.clientX / innerWidth) * 2 - 1;
+        s.tmy = -((e.clientY / innerHeight) * 2 - 1);
+        if (s.px !== null) bump(Math.min(Math.hypot(e.clientX - s.px, e.clientY - s.py), 60) / 280);
+        s.px = e.clientX; s.py = e.clientY;
+      });
+      addEventListener("pointerdown", e => { s.px = e.clientX; s.py = e.clientY; bump(0.15); });
+      addEventListener("pointerleave", () => { s.px = s.py = null; });
+      addEventListener("wheel", e => {
+        const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+        s.scroll += d;
+        bump(Math.min(Math.abs(d), 160) / 520);
+      }, { passive: true });
+      addEventListener("keydown", e => {
+        const k = { ArrowLeft: [-0.12, 0], ArrowRight: [0.12, 0], ArrowUp: [0, 0.12], ArrowDown: [0, -0.12] }[e.key];
+        if (k) { s.tmx = Math.max(-1, Math.min(1, s.tmx + k[0])); s.tmy = Math.max(-1, Math.min(1, s.tmy + k[1])); bump(0.2); }
+        if (e.key === " " || e.key === "PageDown" || e.key === "PageUp") { s.scroll += e.key === "PageUp" ? -240 : 240; bump(0.3); }
+      });
+
+      const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const drift = reduced ? 0.2 : 1;
+      const mix = (a, b, t) => a + (b - a) * t;
+      const smooth = t => t * t * (3 - 2 * t);
+      const TAU = Math.PI * 2;
+
+      // ---------- frame loop ----------
+      const t0 = performance.now();
+      let last = t0;
+      function frame(now) {
+        const dt = Math.min(0.05, (now - last) / 1000);
+        last = now;
+        const t = still ? still.t : ((now - t0) / 1000) * drift;
+
+        const ease = 1 - Math.exp(-dt * 3.5);
+        s.mx += (s.tmx - s.mx) * ease;
+        s.my += (s.tmy - s.my) * ease;
+        const dScroll = (s.scroll - s.scrollS) * (1 - Math.exp(-dt * 5));
+        s.scrollS += dScroll;
+
+        s.energy *= Math.exp(-dt * 0.75);
+        const target = smooth(Math.min(1, s.energy));
+        const rate = target > s.reveal ? 5.0 : 1.1;   // fast in, slow out
+        s.reveal += (target - s.reveal) * (1 - Math.exp(-dt * rate));
+        const r = still ? still.r : s.reveal;
+
+        // Fringes drift at rest; as the reveal rises the phase locks to a whole cycle so the
+        // letters stay dark instead of fading in and out as the drift passes a quarter cycle.
+        let phase;
+        if (still) {
+          const p0 = still.t * 0.35;
+          phase = mix(p0, Math.round(p0 / TAU) * TAU, r);
+        } else {
+          s.phase += (dt * 0.35 * drift + dScroll * 0.006) * (1 - r);
+          s.phase += (Math.round(s.phase / TAU) * TAU - s.phase) * r * (1 - Math.exp(-dt * 3));
+          phase = s.phase;
+        }
+
+        if (s.touched && r > 0.6) hint.classList.add("gone");
+
+        // At rest the two gratings are misaligned: dense fringes hide the letters.
+        // Motion pulls them into register, the beat opens up, and the text inverts out.
+        gl.uniform1f(U.uTime, t);
+        gl.uniform1f(U.uSpin, 0.035 * s.mx - 0.02 * s.my + 0.01 * Math.sin(t * 0.07));
+        gl.uniform1f(U.uAngle, mix(0.19, 0.0, r) + 0.03 * s.mx + 0.004 * Math.sin(t * 0.11));
+        gl.uniform1f(U.uCurve, mix(0.15, 0.0, r) + 0.03 * s.my);
+        // Horizontal offset only: a vertical one is a uniform phase that would fade the letters.
+        gl.uniform2f(U.uOffset, 0.025 * s.mx, 0.0);
+        gl.uniform1f(U.uPhase, phase);
+        gl.uniform1f(U.uShift, Math.PI * mix(0.28, 1.0, r));
+        gl.uniform1f(U.uReveal, r);
+
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+
+</html>

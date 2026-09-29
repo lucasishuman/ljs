@@ -272,7 +272,7 @@ void main() {
       const PERIOD_TILES = 5.0;   // grating period at centre, in mosaic tiles
       // "time" blends night → dawn → day → dusk with the local clock, "random" picks one per
       // load, or name a palette. Override with ?palette=<mode|name>; test times with ?hour=<0-24>.
-      const PALETTE = "time";
+      const PALETTE = "random";
       const DISPERSION = 0.07;    // how far the three inks split apart in the fringes
       // Inks are ordered base, accent, light. The four clock palettes keep similar hues in each
       // slot so the cross-fades between them stay short trips around the colour wheel.

@@ -5,7 +5,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Lucas is human</title>
-  <!-- TODO: replace placeholder copy and https://example.com with the real domain -->
   <meta name="description" content="Lucas is a human who lives in Portland, OR.">
   <meta name="author" content="Lucas J. Shuman">
   <meta name="theme-color" content="#0a040c">
@@ -207,6 +206,14 @@ void main() {
       // break is dropped. Pick a start with ?msg=<index>.
       const MESSAGES = ["LUCAS IS HUMAN", "PORTLAND OREGON", "CODE PHOTO RUN TTRPG"];
       const SCROLL_STEP = 450;    // scroll distance (px) per message
+      // Left alone, the gratings now and then drift into register by themselves for a moment.
+      const GLIMPSE = {
+        first: 5000,              // ms after load before the first one
+        idle: 7000,               // ms without input before they start
+        gap: [9000, 16000],       // ms between glimpses, picked at random
+        length: 2600,             // ms each one lasts
+        peak: 0.9,                // how far it reveals (1 = fully)
+      };
       const FONT = '"Archivo Black", "Arial Black", Impact, sans-serif';
       const PERIOD_TILES = 5.0;   // grating period at centre, in mosaic tiles
       // "time" blends night → dawn → day → dusk with the local clock, "random" picks one per
@@ -471,8 +478,12 @@ void main() {
         energy: 0, reveal: 0,
         scroll: 0, scrollS: 0, phase: 0, twist: 0,
         px: null, py: null,
+        glimpseAt: performance.now() + GLIMPSE.first,
       };
-      const bump = e => { s.energy = Math.min(1.8, s.energy + e); };
+      const bump = e => {
+        s.energy = Math.min(1.8, s.energy + e);
+        s.glimpseAt = Math.max(s.glimpseAt, performance.now() + GLIMPSE.idle);
+      };
 
       // Scroll spins the field and twists the gratings apart; every SCROLL_STEP in one direction
       // moves to the next (or previous) message. A short lock after each step keeps a long
@@ -569,7 +580,13 @@ void main() {
         }
 
         s.energy *= Math.exp(-dt * 0.75);
-        const target = smooth(Math.min(1, s.energy));
+        let glimpse = 0;
+        if (!still && now >= s.glimpseAt) {
+          const g = (now - s.glimpseAt) / GLIMPSE.length;
+          if (g < 1) glimpse = GLIMPSE.peak * Math.sin(Math.PI * g) ** 2;
+          else s.glimpseAt = now + GLIMPSE.gap[0] + Math.random() * (GLIMPSE.gap[1] - GLIMPSE.gap[0]);
+        }
+        const target = Math.max(smooth(Math.min(1, s.energy)), glimpse);
         const rate = target > s.reveal ? 5.0 : 1.1;   // fast in, slow out
         s.reveal += (target - s.reveal) * (1 - Math.exp(-dt * rate));
         const r = still ? still.r : s.reveal;

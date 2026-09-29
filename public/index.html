@@ -121,11 +121,31 @@ uniform float uReveal;
 uniform vec3  uBg;                // palette background
 uniform vec3  uInk0, uInk1, uInk2; // one ink per dispersed channel
 uniform float uDisp;         // per-channel wavelength spread
+uniform vec3  uPat;          // pattern index A, pattern index B, blend A→B
 
 const float TAU = 6.2831853;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+// Grating line families. Each is a phase field with |gradient| ≈ 1 near the centre, so the line
+// spacing stays about PERIOD_TILES whichever is used; `c` is grating B's deviation from A.
+float field(float i, vec2 q, float c) {
+  if (i < 0.5) return q.y + (0.4 + c) * q.x * q.x;                          // parabola
+  if (i < 1.5) {                                                            // rings: arcs around a centre below the view
+    vec2 o = q - vec2(0.0, -1.15);
+    return length(vec2(o.x * (1.0 + c), o.y));
+  }
+  if (i < 2.5) return q.y + (0.07 + 0.4 * c) * sin(6.0 * q.x);              // waves
+  if (i < 3.5) return dot(q, vec2(0.28, 0.96)) + c * q.x * q.x;             // lines
+  // swirl: a spiral centred just outside the view, so its seam never shows
+  vec2 o = q - vec2(-length(0.5 * uRes / uRes.y) - 0.1, 0.0);
+  return length(o) * (1.0 + c) + 0.6 * atan(o.y, o.x);
+}
+float pattern(vec2 q, float c) {
+  float a = field(uPat.x, q, c);
+  return uPat.z > 0.0 ? mix(a, field(uPat.y, q, c), uPat.z) : a;
+}
 
 void main() {
   // --- mosaic: every tile samples the field once, at its centre ---
@@ -142,9 +162,9 @@ void main() {
   float m  = mix(mA, mB, step(hash(cell + 31.7), uMix));   // tiles flip over one by one
 
   // --- two parabolic gratings: lines follow y = -a·x² ---
-  float fa = p.y + 0.4 * p.x * p.x;
   vec2  pb = rot(uAngle) * (p - uOffset);
-  float fb = pb.y + (0.4 + uCurve) * pb.x * pb.x;
+  float fa = pattern(p, 0.0);
+  float fb = pattern(pb, uCurve);
 
   // each channel diffracts at a slightly different wavelength
   vec3 lam = vec3(1.0, 1.0 + uDisp, 1.0 + 2.0 * uDisp);
@@ -185,7 +205,7 @@ void main() {
       // ---------- configuration ----------
       // Scroll steps through these; the first is shown on load. A comma that ends up at a line
       // break is dropped. Pick a start with ?msg=<index>.
-      const MESSAGES = ["LUCAS IS HUMAN.", "PORTLAND OREGON", "CODE PHOTO RUN."];
+      const MESSAGES = ["LUCAS IS HUMAN", "PORTLAND OREGON", "CODE PHOTO RUN TTRPG"];
       const SCROLL_STEP = 450;    // scroll distance (px) per message
       const FONT = '"Archivo Black", "Arial Black", Impact, sans-serif';
       const PERIOD_TILES = 5.0;   // grating period at centre, in mosaic tiles
@@ -206,9 +226,18 @@ void main() {
         acid: ["#060806", "#3f6b12", "#b8e62e", "#f0ff9a"],
       };
       const DAY = [[0, "night"], [6, "dawn"], [12, "day"], [18, "dusk"], [24, "night"]];
+      // Moiré line families. "palette" uses each palette's own (and cross-fades with it through
+      // the day), "random" picks one per load, or name one. Override with ?pattern=<mode|name>.
+      const PATTERN = "random";
+      const PATTERNS = ["parabola", "rings", "waves", "lines", "swirl"];
+      const PAL_PATTERN = {
+        night: "rings", dawn: "waves", day: "parabola", dusk: "swirl",
+        ember: "parabola", ocean: "waves", violet: "swirl", acid: "lines",
+      };
 
       const canvas = document.getElementById("c");
-      // ?still=<reveal 0..1>&t=<seconds>[&tile=<css px>] freezes one frame (used to render og.png).
+      // ?still=<reveal 0..1>&t=<seconds>[&tile=<css px>][&notext] freezes one frame (used to render
+      // og.png and the favicons).
       const params = new URLSearchParams(location.search);
       const still = params.has("still")
         ? {
@@ -244,7 +273,7 @@ void main() {
 
       const U = {};
       ["uRes", "uTime", "uTile", "uMask", "uMaskB", "uMix", "uMaskRes", "uK", "uSpin",
-        "uAngle", "uOffset", "uCurve", "uPhase", "uShift", "uReveal", "uBg", "uInk0", "uInk1", "uInk2", "uDisp"]
+        "uAngle", "uOffset", "uCurve", "uPhase", "uShift", "uReveal", "uBg", "uInk0", "uInk1", "uInk2", "uDisp", "uPat"]
         .forEach(n => U[n] = gl.getUniformLocation(prog, n));
 
       const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
@@ -286,15 +315,25 @@ void main() {
       }
 
       // Hold each key palette for a few hours, cross-fade over the middle of each gap.
-      function paletteAt(hour) {
+      function dayBlend(hour) {
         let i = 0;
         while (DAY[i + 1][0] <= hour) i++;
         const [h0, a] = DAY[i], [h1, b] = DAY[i + 1];
         const f = (hour - h0) / (h1 - h0);
         const u = Math.min(1, Math.max(0, (f - 0.35) / 0.3));
-        const k = u * u * (3 - 2 * u);
+        return { a, b, k: u * u * (3 - 2 * u) };
+      }
+
+      const patMode = params.get("pattern") || PATTERN;
+      const fixedPat = patMode === "random"
+        ? Math.floor(Math.random() * PATTERNS.length)
+        : PATTERNS.indexOf(patMode);
+      // Palette a → b at blend k; the pattern follows the same blend unless one is fixed.
+      function applyLook({ a, b, k }) {
         const A = paletteRGB(a), B = paletteRGB(b);
-        return A.map((c, j) => lerpOklch(c, B[j], k));
+        setPalette(A.map((c, j) => lerpOklch(c, B[j], k)));
+        if (fixedPat >= 0) gl.uniform3f(U.uPat, fixedPat, fixedPat, 0);
+        else gl.uniform3f(U.uPat, PATTERNS.indexOf(PAL_PATTERN[a]), PATTERNS.indexOf(PAL_PATTERN[b]), k);
       }
 
       const mode = params.get("palette") || PALETTE;
@@ -304,13 +343,14 @@ void main() {
         return d.getHours() + d.getMinutes() / 60;
       };
       const followClock = !(mode in PALETTES) && mode !== "random";
-      if (mode in PALETTES) setPalette(paletteRGB(mode));
+      if (mode in PALETTES) applyLook({ a: mode, b: mode, k: 0 });
       else if (mode === "random") {
         const names = Object.keys(PALETTES);
-        setPalette(paletteRGB(names[Math.floor(Math.random() * names.length)]));
-      } else setPalette(paletteAt(fixedHour ?? localHour()));
+        const name = names[Math.floor(Math.random() * names.length)];
+        applyLook({ a: name, b: name, k: 0 });
+      } else applyLook(dayBlend(fixedHour ?? localHour()));
       gl.uniform1f(U.uDisp, DISPERSION);
-      if (followClock && fixedHour === null) setInterval(() => setPalette(paletteAt(localHour())), 60000);
+      if (followClock && fixedHour === null) setInterval(() => applyLook(dayBlend(localHour())), 60000);
 
       // One mask texture per message; the shader reads the current one on unit 0 and the one
       // being switched to on unit 1.
@@ -412,7 +452,7 @@ void main() {
         tile = Math.max(3, Math.round(tileCss * dpr));
         const mw = Math.ceil(W / tile), mh = Math.ceil(H / tile);
         layoutGrid(mw, mh);
-        TEXTS.forEach((text, i) => buildMask(text, maskTex[i], mw, mh));
+        TEXTS.forEach((text, i) => buildMask(still && params.has("notext") ? "" : text, maskTex[i], mw, mh));
         bindMasks();
         gl.uniform2f(U.uRes, W, H);
         gl.uniform1f(U.uTile, tile);

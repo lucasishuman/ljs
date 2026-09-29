@@ -121,6 +121,7 @@ uniform vec3  uBg;                // palette background
 uniform vec3  uInk0, uInk1, uInk2; // one ink per dispersed channel
 uniform float uDisp;         // per-channel wavelength spread
 uniform vec3  uPat;          // pattern index A, pattern index B, blend A→B
+uniform float uShape;        // tile shape: 0 squares, 1 hexagons, 2 dots, 3 bricks, 4 diamonds
 
 const float TAU = 6.2831853;
 
@@ -146,16 +147,64 @@ float pattern(vec2 q, float c) {
   return uPat.z > 0.0 ? mix(a, field(uPat.y, q, c), uPat.z) : a;
 }
 
+// The tile a pixel falls in: its centre (px), an id for per-tile randomness, the pixel's position
+// within it (in tile units) and its distance to the tile's border (px). Every shape covers about
+// one square tile's area, so the letters keep their resolution.
+struct Tile { vec2 c; vec2 id; vec2 local; float edge; };
+
+Tile tileAt(vec2 f) {
+  Tile t;
+  if (abs(uShape - 1.0) < 0.5) {                // hexagons (flat sides left and right)
+    float s = uTile * 1.0746;                   // inradius 0.5·s ⇒ area ≈ uTile²
+    vec2 q = f / s;
+    vec2 r = vec2(1.0, 1.7320508);
+    vec2 a = mod(q, r) - 0.5 * r;
+    vec2 b = mod(q - 0.5 * r, r) - 0.5 * r;
+    vec2 g = dot(a, a) < dot(b, b) ? a : b;
+    t.c = (q - g) * s;
+    t.id = floor((q - g) * 2.0 + 0.5);
+    t.local = g * s / uTile;
+    t.edge = (0.5 - max(abs(g.x), dot(abs(g), vec2(0.5, 0.8660254)))) * s;
+  } else if (abs(uShape - 3.0) < 0.5) {         // bricks, 2:1, alternate courses offset by half
+    vec2 sz = uTile * vec2(1.4142, 0.7071);
+    float row = floor(f.y / sz.y);
+    float off = 0.5 * mod(row, 2.0);
+    float col = floor(f.x / sz.x + off);
+    t.c = vec2((col + 0.5 - off) * sz.x, (row + 0.5) * sz.y);
+    t.id = vec2(col, row);
+    vec2 d = f - t.c;
+    t.local = d / uTile;
+    t.edge = min(0.5 * sz.x - abs(d.x), 0.5 * sz.y - abs(d.y));
+  } else if (uShape > 3.5) {                    // diamonds: the square grid turned 45°
+    mat2 R = rot(0.7853982);
+    vec2 g = R * f;
+    vec2 cell = floor(g / uTile);
+    vec2 cg = (cell + 0.5) * uTile;
+    t.c = cg * R;                               // v * R undoes R * v
+    t.id = cell;
+    t.local = (g - cg) / uTile;
+    t.edge = (0.5 - max(abs(t.local.x), abs(t.local.y))) * uTile;
+  } else {                                      // squares (dots sit on the same grid)
+    vec2 cell = floor(f / uTile);
+    t.c = (cell + 0.5) * uTile;
+    t.id = cell;
+    t.local = f / uTile - cell - 0.5;
+    t.edge = (0.5 - max(abs(t.local.x), abs(t.local.y))) * uTile;
+  }
+  return t;
+}
+
 void main() {
   // --- mosaic: every tile samples the field once, at its centre ---
   vec2 frag  = gl_FragCoord.xy;
-  vec2 cell  = floor(frag / uTile);
-  vec2 local = fract(frag / uTile) - 0.5;
-  vec2 c     = (cell + 0.5) * uTile;
+  Tile tl    = tileAt(frag);
+  vec2 cell  = tl.id;
+  vec2 local = tl.local;
+  vec2 c     = tl.c;
   vec2 p     = rot(uSpin) * ((c - 0.5 * uRes) / uRes.y);
 
   // --- hidden text: encoded as a phase shift in grating A ---
-  vec2 muv = (cell + 0.5) / uMaskRes;
+  vec2 muv = c / (uTile * uMaskRes);
   float mA = step(0.5, texture2D(uMask, muv).r);
   float mB = step(0.5, texture2D(uMaskB, muv).r);
   float m  = mix(mA, mB, step(hash(cell + 31.7), uMix));   // tiles flip over one by one
@@ -187,8 +236,13 @@ void main() {
   float j = hash(cell);
   col *= 0.86 + 0.28 * j;
   col *= 1.0 + 0.16 * (local.y - local.x);
-  float edge  = max(abs(local.x), abs(local.y));
-  float grout = 1.0 - smoothstep(0.5 - 1.3 / uTile, 0.5 - 0.25 / uTile, edge);
+  float edge = tl.edge;
+  if (abs(uShape - 2.0) < 0.5) {                // halftone: brighter tiles print bigger dots
+    float v = clamp(dot(col, vec3(0.35, 0.45, 0.2)) * 1.4, 0.0, 1.0);
+    edge = uTile * (0.27 + 0.2 * v - length(local));
+    col *= 1.2;
+  }
+  float grout = smoothstep(0.25, 1.3, edge);
   col = mix(uBg * 0.6, col, grout);
 
   // vignette
@@ -241,6 +295,13 @@ void main() {
         night: "rings", dawn: "waves", day: "parabola", dusk: "swirl",
         ember: "parabola", ocean: "waves", violet: "swirl", acid: "lines",
       };
+      // Mosaic tile shapes, chosen the same way. Override with ?tiles=<mode|name>.
+      const TILES = "dots";
+      const SHAPES = ["squares", "hexagons", "dots", "bricks", "diamonds"];
+      const PAL_TILES = {
+        night: "dots", dawn: "hexagons", day: "squares", dusk: "diamonds",
+        ember: "bricks", ocean: "hexagons", violet: "dots", acid: "squares",
+      };
 
       const canvas = document.getElementById("c");
       // ?still=<reveal 0..1>&t=<seconds>[&tile=<css px>][&notext] freezes one frame (used to render
@@ -280,7 +341,7 @@ void main() {
 
       const U = {};
       ["uRes", "uTime", "uTile", "uMask", "uMaskB", "uMix", "uMaskRes", "uK", "uSpin",
-        "uAngle", "uOffset", "uCurve", "uPhase", "uShift", "uReveal", "uBg", "uInk0", "uInk1", "uInk2", "uDisp", "uPat"]
+        "uAngle", "uOffset", "uCurve", "uPhase", "uShift", "uReveal", "uBg", "uInk0", "uInk1", "uInk2", "uDisp", "uPat", "uShape"]
         .forEach(n => U[n] = gl.getUniformLocation(prog, n));
 
       const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
@@ -335,12 +396,18 @@ void main() {
       const fixedPat = patMode === "random"
         ? Math.floor(Math.random() * PATTERNS.length)
         : PATTERNS.indexOf(patMode);
-      // Palette a → b at blend k; the pattern follows the same blend unless one is fixed.
+      const tileMode = params.get("tiles") || TILES;
+      const fixedShape = tileMode === "random"
+        ? Math.floor(Math.random() * SHAPES.length)
+        : SHAPES.indexOf(tileMode);
+      // Palette a → b at blend k; the pattern follows the same blend unless one is fixed. Shapes
+      // can't blend, so they switch at the midpoint.
       function applyLook({ a, b, k }) {
         const A = paletteRGB(a), B = paletteRGB(b);
         setPalette(A.map((c, j) => lerpOklch(c, B[j], k)));
         if (fixedPat >= 0) gl.uniform3f(U.uPat, fixedPat, fixedPat, 0);
         else gl.uniform3f(U.uPat, PATTERNS.indexOf(PAL_PATTERN[a]), PATTERNS.indexOf(PAL_PATTERN[b]), k);
+        gl.uniform1f(U.uShape, fixedShape >= 0 ? fixedShape : SHAPES.indexOf(PAL_TILES[k < 0.5 ? a : b]));
       }
 
       const mode = params.get("palette") || PALETTE;

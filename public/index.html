@@ -31,8 +31,7 @@
   <meta name="twitter:image" content="https://lucasishuman.com/og.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&display=swap"
-    rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #07070a;
@@ -108,6 +107,8 @@ uniform vec2  uRes;       // canvas size, device px
 uniform float uTime;
 uniform float uTile;      // mosaic tile size, device px
 uniform sampler2D uMask;  // text mask, one texel per tile
+uniform sampler2D uMaskB; // next message's mask, while switching
+uniform float uMix;       // 0..1 progress of the switch
 uniform vec2  uMaskRes;
 uniform float uK;         // grating wavenumber
 uniform float uSpin;      // whole-field rotation
@@ -136,7 +137,9 @@ void main() {
 
   // --- hidden text: encoded as a phase shift in grating A ---
   vec2 muv = (cell + 0.5) / uMaskRes;
-  float m  = step(0.5, texture2D(uMask, muv).r);
+  float mA = step(0.5, texture2D(uMask, muv).r);
+  float mB = step(0.5, texture2D(uMaskB, muv).r);
+  float m  = mix(mA, mB, step(hash(cell + 31.7), uMix));   // tiles flip over one by one
 
   // --- two parabolic gratings: lines follow y = -a·x² ---
   float fa = p.y + 0.4 * p.x * p.x;
@@ -180,7 +183,10 @@ void main() {
   <script>
     (() => {
       // ---------- configuration ----------
-      const TEXT = "LUCAS IS HUMAN";
+      // Scroll steps through these; the first is shown on load. A comma that ends up at a line
+      // break is dropped. Pick a start with ?msg=<index>.
+      const MESSAGES = ["LUCAS IS HUMAN.", "PORTLAND OREGON", "CODE PHOTO RUN."];
+      const SCROLL_STEP = 450;    // scroll distance (px) per message
       const FONT = '"Archivo Black", "Arial Black", Impact, sans-serif';
       const PERIOD_TILES = 5.0;   // grating period at centre, in mosaic tiles
       // "time" blends night → dawn → day → dusk with the local clock, "random" picks one per
@@ -237,7 +243,7 @@ void main() {
       gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
       const U = {};
-      ["uRes", "uTime", "uTile", "uMask", "uMaskRes", "uK", "uSpin",
+      ["uRes", "uTime", "uTile", "uMask", "uMaskB", "uMix", "uMaskRes", "uK", "uSpin",
         "uAngle", "uOffset", "uCurve", "uPhase", "uShift", "uReveal", "uBg", "uInk0", "uInk1", "uInk2", "uDisp"]
         .forEach(n => U[n] = gl.getUniformLocation(prog, n));
 
@@ -306,64 +312,89 @@ void main() {
       gl.uniform1f(U.uDisp, DISPERSION);
       if (followClock && fixedHour === null) setInterval(() => setPalette(paletteAt(localHour())), 60000);
 
-      const tex = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      // One mask texture per message; the shader reads the current one on unit 0 and the one
+      // being switched to on unit 1.
+      function makeTex() {
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        return t;
+      }
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      const maskTex = MESSAGES.map(makeTex);
       gl.uniform1i(U.uMask, 0);
+      gl.uniform1i(U.uMaskB, 1);
+
+      const startMsg = Math.min(MESSAGES.length - 1, Math.max(0, parseInt(params.get("msg"), 10) || 0));
+      const msg = { from: startMsg, to: startMsg, k: 1, acc: 0, lock: 0 };
+      function bindMasks() {
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, maskTex[msg.to]);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, maskTex[msg.from]);
+      }
+      function stepMessage(dir) {
+        if (msg.k < 1) msg.from = msg.to;   // mid-switch: land the current one, start the next
+        msg.to = (msg.to + dir + MESSAGES.length) % MESSAGES.length;
+        msg.k = 0;
+        bindMasks();
+      }
 
       // ---------- text mask (one pixel per mosaic tile → blocky letters) ----------
       const mc = document.createElement("canvas");
       const mctx = mc.getContext("2d", { willReadFrequently: false });
 
-      // Every way to break the words into contiguous lines.
-      function lineings(words) {
-        const out = [];
-        const n = words.length;
-        for (let mask = 0; mask < 1 << (n - 1); mask++) {
-          const lines = [];
-          let cur = [words[0]];
-          for (let i = 1; i < n; i++) {
-            if (mask & (1 << (i - 1))) { lines.push(cur.join(" ")); cur = [words[i]]; }
-            else cur.push(words[i]);
-          }
-          lines.push(cur.join(" "));
-          out.push(lines);
+      // All messages share one letter grid: a space takes one cell, the same number of cells per line
+      // and the same size for every message, so they line up column for column. The column count
+      // is whatever gives the largest letters with the longest message still fitting the view.
+      const LH = 0.86;      // line step, em (Archivo Black caps ≈ 0.72em)
+      const TRACK = 0.1;    // gap between letter cells, em
+      const TEXTS = MESSAGES.map(m => m.trim().replace(/\s+/g, " "));
+      let grid = null;
+
+      function layoutGrid(mw, mh) {
+        mctx.font = `100px ${FONT}`;
+        try { mctx.letterSpacing = "0px"; } catch (_) {}
+        const chars = [...new Set(TEXTS.join("").replace(/ /g, ""))];
+        const cellEm = Math.max(...chars.map(c => mctx.measureText(c).width)) / 100 + TRACK;
+        const boxW = mw * 0.88, boxH = mh * 0.7;
+        const longest = Math.max(...TEXTS.map(t => t.length));
+        let best = null;
+        for (let cols = 1; cols <= longest; cols++) {
+          const rows = Math.max(...TEXTS.map(t => Math.ceil(t.length / cols)));
+          const size = Math.min(boxW / (cols * cellEm), boxH / (rows * LH));
+          if (!best || size > best.size) best = { cols, size };
         }
-        return out;
+        // snap the cell and line step to whole tiles so every letter sits on the mosaic grid
+        const cell = Math.max(1, Math.floor(best.size * cellEm));
+        const size = Math.floor(cell / cellEm);
+        grid = { cols: best.cols, cell, size, step: Math.max(1, Math.round(size * LH)) };
       }
 
-      function buildMask(mw, mh) {
+      function buildMask(text, tex, mw, mh) {
         mc.width = mw;
         mc.height = mh;
         mctx.fillStyle = "#000";
         mctx.fillRect(0, 0, mw, mh);
 
-        const LH = 0.86;   // line step, em (Archivo Black caps ≈ 0.72em)
-        const boxW = mw * 0.88, boxH = mh * 0.7;
-        mctx.font = `100px ${FONT}`;
-        try { mctx.letterSpacing = "2px"; } catch (_) {}
-
-        let best = null;
-        for (const lines of lineings(TEXT.split(/\s+/))) {
-          const wide = Math.max(...lines.map(l => mctx.measureText(l).width));
-          const size = Math.min((boxW / wide) * 100, boxH / (lines.length * LH));
-          if (!best || size > best.size) best = { lines, size };
-        }
-
-        const size = Math.floor(best.size);
+        const { cols, cell, size, step } = grid;
         mctx.font = `${size}px ${FONT}`;
-        try { mctx.letterSpacing = `${Math.round(size * 0.02)}px`; } catch (_) {}
+        try { mctx.letterSpacing = "0px"; } catch (_) {}
         mctx.fillStyle = "#fff";
         mctx.textAlign = "center";
         mctx.textBaseline = "middle";
-        const step = size * LH;
-        const y0 = mh / 2 - (step * (best.lines.length - 1)) / 2 + size * 0.04;
-        best.lines.forEach((l, i) => mctx.fillText(l, mw / 2, y0 + i * step));
+        const rows = Math.ceil(text.length / cols);
+        const x0 = Math.round((mw - cols * cell) / 2);
+        const y0 = Math.round(mh / 2 - (step * (rows - 1)) / 2 + size * 0.04);
+        [...text].forEach((ch, i) => {
+          const col = i % cols, row = Math.floor(i / cols);
+          mctx.fillText(ch, x0 + (col + 0.5) * cell, y0 + row * step);
+        });
 
+        gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, mc);
       }
@@ -380,7 +411,9 @@ void main() {
         const tileCss = still && still.tile ? still.tile : Math.min(12, Math.max(5, Math.min(innerWidth, innerHeight) / 115));
         tile = Math.max(3, Math.round(tileCss * dpr));
         const mw = Math.ceil(W / tile), mh = Math.ceil(H / tile);
-        buildMask(mw, mh);
+        layoutGrid(mw, mh);
+        TEXTS.forEach((text, i) => buildMask(text, maskTex[i], mw, mh));
+        bindMasks();
         gl.uniform2f(U.uRes, W, H);
         gl.uniform1f(U.uTile, tile);
         gl.uniform2f(U.uMaskRes, mw, mh);
@@ -401,10 +434,31 @@ void main() {
       };
       const bump = e => { s.energy = Math.min(1.8, s.energy + e); };
 
+      // Scroll spins the field and twists the gratings apart; every SCROLL_STEP in one direction
+      // moves to the next (or previous) message. A short lock after each step keeps a long
+      // trackpad flick from skipping through several.
+      function scrollBy(d) {
+        s.scroll += d;
+        s.twist = Math.max(-0.3, Math.min(0.3, s.twist + d * 0.0005));
+        bump(Math.min(Math.abs(d), 160) / 520);
+        if (performance.now() < msg.lock) { msg.acc = 0; return; }
+        if (Math.sign(d) !== Math.sign(msg.acc)) msg.acc = 0;
+        msg.acc += d;
+        if (Math.abs(msg.acc) >= SCROLL_STEP) {
+          stepMessage(Math.sign(msg.acc));
+          bump(1.2);   // hold the reveal long enough to read the new message once the twist settles
+          msg.acc = 0;
+          msg.lock = performance.now() + 700;
+        }
+      }
+
       addEventListener("pointermove", e => {
         s.tmx = (e.clientX / innerWidth) * 2 - 1;
         s.tmy = -((e.clientY / innerHeight) * 2 - 1);
-        if (s.px !== null) bump(Math.min(Math.hypot(e.clientX - s.px, e.clientY - s.py), 60) / 280);
+        if (s.px !== null) {
+          bump(Math.min(Math.hypot(e.clientX - s.px, e.clientY - s.py), 60) / 280);
+          if (e.pointerType === "touch") scrollBy((s.py - e.clientY) * 2);   // swipe up = scroll down
+        }
         s.px = e.clientX; s.py = e.clientY;
       });
       addEventListener("pointerdown", e => { s.px = e.clientX; s.py = e.clientY; bump(0.15); });
@@ -436,16 +490,14 @@ void main() {
       if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
         addEventListener("touchend", () => DeviceOrientationEvent.requestPermission().catch(() => {}), { once: true });
       }
-      addEventListener("wheel", e => {
-        const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
-        s.scroll += d;
-        s.twist = Math.max(-0.6, Math.min(0.6, s.twist + d * 0.0012));
-        bump(Math.min(Math.abs(d), 160) / 520);
-      }, { passive: true });
+      addEventListener("wheel", e => scrollBy(e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY), { passive: true });
       addEventListener("keydown", e => {
         const k = { ArrowLeft: [-0.12, 0], ArrowRight: [0.12, 0], ArrowUp: [0, 0.12], ArrowDown: [0, -0.12] }[e.key];
         if (k) { s.tmx = Math.max(-1, Math.min(1, s.tmx + k[0])); s.tmy = Math.max(-1, Math.min(1, s.tmy + k[1])); bump(0.2); }
-        if (e.key === " " || e.key === "PageDown" || e.key === "PageUp") { const d = e.key === "PageUp" ? -240 : 240; s.scroll += d; s.twist = Math.max(-0.6, Math.min(0.6, s.twist + d * 0.0012)); bump(0.3); }
+        if (e.key === " " || e.key === "PageDown" || e.key === "PageUp") {
+          msg.lock = 0;
+          scrollBy((e.key === "PageUp" ? -1 : 1) * SCROLL_STEP);
+        }
       });
 
       const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -466,7 +518,7 @@ void main() {
         s.my += (s.tmy - s.my) * ease;
         const dScroll = (s.scroll - s.scrollS) * (1 - Math.exp(-dt * 5));
         s.scrollS += dScroll;
-        s.twist *= Math.exp(-dt * 1.6);   // scroll twists the gratings apart; they spring back into register
+        s.twist *= Math.exp(-dt * 3.0);   // scroll twists the gratings apart; they spring back into register
 
         if (tilt.on) {
           const k = 1 - Math.exp(-dt / 6);
@@ -497,7 +549,7 @@ void main() {
         // At rest the two gratings are misaligned: dense fringes hide the letters.
         // Motion pulls them into register, the beat opens up, and the text inverts out.
         gl.uniform1f(U.uTime, t);
-        gl.uniform1f(U.uSpin, s.scrollS * 0.0008 + 0.035 * s.mx - 0.02 * s.my + 0.01 * Math.sin(t * 0.07));
+        gl.uniform1f(U.uSpin, s.scrollS * 0.0003 + 0.035 * s.mx - 0.02 * s.my + 0.01 * Math.sin(t * 0.07));
         gl.uniform1f(U.uAngle, mix(0.19, 0.0, r) + s.twist + 0.03 * s.mx + 0.004 * Math.sin(t * 0.11));
         gl.uniform1f(U.uCurve, mix(0.15, 0.0, r) + 0.03 * s.my);
         // Horizontal offset only: a vertical one is a uniform phase that would fade the letters.
@@ -505,6 +557,12 @@ void main() {
         gl.uniform1f(U.uPhase, phase);
         gl.uniform1f(U.uShift, Math.PI * mix(0.28, 1.0, r));
         gl.uniform1f(U.uReveal, r);
+
+        if (msg.k < 1) {
+          msg.k = Math.min(1, msg.k + dt / 0.9);
+          if (msg.k === 1) { msg.from = msg.to; bindMasks(); }
+        }
+        gl.uniform1f(U.uMix, msg.from === msg.to ? 0 : smooth(msg.k));
 
         gl.drawArrays(gl.TRIANGLES, 0, 3);
         requestAnimationFrame(frame);

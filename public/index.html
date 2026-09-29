@@ -31,13 +31,12 @@
   <meta name="twitter:image" content="https://lucasishuman.com/og.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=JetBrains+Mono:wght@400&display=swap"
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&display=swap"
     rel="stylesheet">
   <style>
     :root {
       --bg: #07070a;
       --ink: #f4f1ea;
-      --dim: rgba(244, 241, 234, 0.55);
     }
 
     * {
@@ -75,23 +74,6 @@
       white-space: nowrap;
     }
 
-    .hint {
-      position: fixed;
-      left: 16px;
-      bottom: 16px;
-      font: 400 11px/1.2 "JetBrains Mono", ui-monospace, Menlo, monospace;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--dim);
-      pointer-events: none;
-      transition: opacity 1.6s ease;
-      mix-blend-mode: difference;
-    }
-
-    .hint.gone {
-      opacity: 0;
-    }
-
     /* Fallback when WebGL is unavailable. */
     body.nogl h1 {
       position: fixed;
@@ -107,17 +89,12 @@
       text-align: center;
       white-space: normal;
     }
-
-    body.nogl .hint {
-      display: none;
-    }
   </style>
 </head>
 
 <body>
   <h1>Lucas J. Shuman</h1>
   <canvas id="c" aria-hidden="true"></canvas>
-  <div class="hint" id="hint">move · scroll · reveal</div>
 
   <script id="vs" type="x-shader/x-vertex">
 attribute vec2 aPos;
@@ -225,13 +202,15 @@ void main() {
       const DAY = [[0, "night"], [6, "dawn"], [12, "day"], [18, "dusk"], [24, "night"]];
 
       const canvas = document.getElementById("c");
-      const hint = document.getElementById("hint");
       // ?still=<reveal 0..1>&t=<seconds>[&tile=<css px>] freezes one frame (used to render og.png).
       const params = new URLSearchParams(location.search);
       const still = params.has("still")
-        ? { r: parseFloat(params.get("still")) || 0, t: parseFloat(params.get("t")) || 0, tile: parseFloat(params.get("tile")) || 0 }
+        ? {
+          r: parseFloat(params.get("still")) || 0,
+          t: parseFloat(params.get("t")) || 0,
+          tile: parseFloat(params.get("tile")) || 0,
+        }
         : null;
-      if (still) hint.style.display = "none";
       const gl = canvas.getContext("webgl", { antialias: false, alpha: false, preserveDrawingBuffer: false });
       if (!gl) { document.body.classList.add("nogl"); return; }
 
@@ -418,9 +397,9 @@ void main() {
         mx: 0, my: 0, tmx: 0, tmy: 0,
         energy: 0, reveal: 0,
         scroll: 0, scrollS: 0, phase: 0, twist: 0,
-        px: null, py: null, touched: false,
+        px: null, py: null,
       };
-      const bump = e => { s.energy = Math.min(1.8, s.energy + e); s.touched = true; };
+      const bump = e => { s.energy = Math.min(1.8, s.energy + e); };
 
       addEventListener("pointermove", e => {
         s.tmx = (e.clientX / innerWidth) * 2 - 1;
@@ -429,7 +408,34 @@ void main() {
         s.px = e.clientX; s.py = e.clientY;
       });
       addEventListener("pointerdown", e => { s.px = e.clientX; s.py = e.clientY; bump(0.15); });
-      addEventListener("pointerleave", () => { s.px = s.py = null; });
+      // a new touch shouldn't count the jump from where the last one lifted
+      const lift = e => { if (e.pointerType === "touch") s.px = s.py = null; };
+      addEventListener("pointerup", lift);
+      addEventListener("pointercancel", lift);
+      document.documentElement.addEventListener("pointerleave", () => { s.px = s.py = null; });
+
+      // ---------- phone tilt ----------
+      // Tilt relative to however the phone is being held; the neutral pose slowly re-centres,
+      // so holding still lets the letters sink back into the pattern.
+      const tilt = { on: false, x: 0, y: 0, bx: 0, by: 0, lx: 0, ly: 0 };
+      function onOrient(e) {
+        if (e.beta == null || e.gamma == null) return;
+        const a = (((screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0) + 360) % 360;
+        let x = e.gamma, y = e.beta;
+        if (a === 90) { x = e.beta; y = -e.gamma; }
+        else if (a === 270) { x = -e.beta; y = e.gamma; }
+        else if (a === 180) { x = -e.gamma; y = -e.beta; }
+        if (!tilt.on) { Object.assign(tilt, { on: true, bx: x, by: y, lx: x, ly: y }); }
+        const d = Math.hypot(x - tilt.lx, y - tilt.ly);
+        if (d > 0.15) bump(Math.min(d, 4) / 30);
+        Object.assign(tilt, { x, y, lx: x, ly: y });
+      }
+      // Listen everywhere; browsers that gate motion sensors (iOS Safari) only start delivering
+      // events once permission is granted, which must be asked from a user gesture.
+      if (!still) addEventListener("deviceorientation", onOrient);
+      if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+        addEventListener("touchend", () => DeviceOrientationEvent.requestPermission().catch(() => {}), { once: true });
+      }
       addEventListener("wheel", e => {
         const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
         s.scroll += d;
@@ -462,6 +468,14 @@ void main() {
         s.scrollS += dScroll;
         s.twist *= Math.exp(-dt * 1.6);   // scroll twists the gratings apart; they spring back into register
 
+        if (tilt.on) {
+          const k = 1 - Math.exp(-dt / 6);
+          tilt.bx += (tilt.x - tilt.bx) * k;
+          tilt.by += (tilt.y - tilt.by) * k;
+          s.tmx = Math.max(-1, Math.min(1, (tilt.x - tilt.bx) / 18));
+          s.tmy = Math.max(-1, Math.min(1, -(tilt.y - tilt.by) / 18));
+        }
+
         s.energy *= Math.exp(-dt * 0.75);
         const target = smooth(Math.min(1, s.energy));
         const rate = target > s.reveal ? 5.0 : 1.1;   // fast in, slow out
@@ -479,8 +493,6 @@ void main() {
           s.phase += (Math.round(s.phase / TAU) * TAU - s.phase) * r * (1 - Math.exp(-dt * 3));
           phase = s.phase;
         }
-
-        if (s.touched && r > 0.6) hint.classList.add("gone");
 
         // At rest the two gratings are misaligned: dense fringes hide the letters.
         // Motion pulls them into register, the beat opens up, and the text inverts out.

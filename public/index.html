@@ -72,6 +72,31 @@
       white-space: nowrap;
     }
 
+    .links {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      visibility: hidden;
+    }
+
+    .links.on {
+      visibility: visible;
+    }
+
+    .links a {
+      position: absolute;
+      pointer-events: auto;
+      color: transparent;
+      overflow: hidden;
+      cursor: pointer;
+      outline: none;
+    }
+
+    .links a:focus-visible {
+      outline: 2px solid var(--ink);
+      outline-offset: 2px;
+    }
+
     /* Fallback when WebGL is unavailable. */
     body.nogl h1 {
       position: fixed;
@@ -122,6 +147,8 @@ uniform vec3  uInk0, uInk1, uInk2; // one ink per dispersed channel
 uniform float uDisp;         // per-channel wavelength spread
 uniform vec3  uPat;          // pattern index A, pattern index B, blend A→B
 uniform float uShape;        // tile shape: 0 squares, 1 hexagons, 2 dots, 3 bricks, 4 diamonds
+uniform vec4  uHi[4];        // hovered link word, one rect per line it spans (mask px, top-down)
+uniform float uHiK;          // 0..1 how lit the hovered word is
 
 const float TAU = 6.2831853;
 
@@ -232,6 +259,17 @@ void main() {
   float drift = 1.0 + 0.12 * sin(1.7 * p.x - 1.1 * p.y + 0.05 * uTime);
   vec3 col = uBg + (1.0 - exp(-ink * 0.65 * drift));
 
+  // --- hovered link: its letters print solid with a shimmer running through them ---
+  vec2 mp = vec2(muv.x, 1.0 - muv.y) * uMaskRes;
+  float inHi = 0.0;
+  for (int i = 0; i < 4; i++) {
+    vec4 r = uHi[i];
+    inHi = max(inHi, step(r.x, mp.x) * step(mp.x, r.z) * step(r.y, mp.y) * step(mp.y, r.w));
+  }
+  float shimmer = 0.5 + 0.5 * sin(0.35 * (mp.x + 0.6 * mp.y) - 4.0 * uTime);
+  vec3 lit = uBg + mix(uInk1, uInk2, shimmer) * 1.15;
+  col = mix(col, mix(col * 0.3, lit, m), uHiK * inHi);
+
   // --- tesserae: per-tile variance, bevel, grout ---
   float j = hash(cell);
   col *= 0.86 + 0.28 * j;
@@ -258,7 +296,15 @@ void main() {
       // ---------- configuration ----------
       // Scroll steps through these; the first is shown on load. A comma that ends up at a line
       // break is dropped. Pick a start with ?msg=<index>.
-      const MESSAGES = ["LUCAS IS HUMAN", "PORTLAND OREGON", "CODE PHOTO RUN TTRPG"];
+      const MESSAGES = ["LUCAS IS HUMAN", "PORTLAND OREGON", "CODE PHOTO WORK RUN GAME"];
+      // Words that link somewhere, in any message.
+      const LINKS = {
+        CODE: "https://github.com/lucasishuman",
+        PHOTO: "https://www.instagram.com/lucasishuman",
+        WORK: "https://www.linkedin.com/in/lucasishuman/",
+        RUN: "https://www.strava.com/athletes/5897624",
+        GAME: "https://www.emberofdawn.com/",
+      };
       const SCROLL_STEP = 450;    // scroll distance (px) per message
       // Left alone, the gratings now and then drift into register by themselves for a moment.
       const GLIMPSE = {
@@ -341,7 +387,7 @@ void main() {
 
       const U = {};
       ["uRes", "uTime", "uTile", "uMask", "uMaskB", "uMix", "uMaskRes", "uK", "uSpin",
-        "uAngle", "uOffset", "uCurve", "uPhase", "uShift", "uReveal", "uBg", "uInk0", "uInk1", "uInk2", "uDisp", "uPat", "uShape"]
+        "uAngle", "uOffset", "uCurve", "uPhase", "uShift", "uReveal", "uBg", "uInk0", "uInk1", "uInk2", "uDisp", "uPat", "uShape", "uHi", "uHiK"]
         .forEach(n => U[n] = gl.getUniformLocation(prog, n));
 
       const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
@@ -455,6 +501,8 @@ void main() {
         msg.to = (msg.to + dir + MESSAGES.length) % MESSAGES.length;
         msg.k = 0;
         bindMasks();
+        showLinks();
+        s.hover = false;
       }
 
       // ---------- text mask (one pixel per mosaic tile → blocky letters) ----------
@@ -488,6 +536,16 @@ void main() {
         grid = { cols: best.cols, cell, size, step: Math.max(1, Math.round(size * LH)) };
       }
 
+      // Mask-pixel position of a message's first cell: x0 is its left edge, y0 the first line's middle.
+      function placement(text, mw, mh) {
+        const { cols, cell, size, step } = grid;
+        const rows = Math.ceil(text.length / cols);
+        return {
+          x0: Math.round((mw - cols * cell) / 2),
+          y0: Math.round(mh / 2 - (step * (rows - 1)) / 2 + size * 0.04),
+        };
+      }
+
       function buildMask(text, tex, mw, mh) {
         mc.width = mw;
         mc.height = mh;
@@ -500,9 +558,7 @@ void main() {
         mctx.fillStyle = "#fff";
         mctx.textAlign = "center";
         mctx.textBaseline = "middle";
-        const rows = Math.ceil(text.length / cols);
-        const x0 = Math.round((mw - cols * cell) / 2);
-        const y0 = Math.round(mh / 2 - (step * (rows - 1)) / 2 + size * 0.04);
+        const { x0, y0 } = placement(text, mw, mh);
         [...text].forEach((ch, i) => {
           const col = i % cols, row = Math.floor(i / cols);
           mctx.fillText(ch, x0 + (col + 0.5) * cell, y0 + row * step);
@@ -511,6 +567,61 @@ void main() {
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, mc);
+      }
+
+      // ---------- word links ----------
+      // Invisible anchors laid over the letter cells of any word in LINKS, one per line a word
+      // spans. Only the message being shown has its links switched on.
+      const linkLayers = TEXTS.map(() => {
+        const d = document.createElement("div");
+        d.className = "links";
+        document.body.appendChild(d);
+        return d;
+      });
+      function showLinks() {
+        linkLayers.forEach((d, i) => d.classList.toggle("on", i === msg.to));
+      }
+
+      function buildLinks(text, layer, mw, mh) {
+        layer.replaceChildren();
+        const { cols, cell, step } = grid;
+        const { x0, y0 } = placement(text, mw, mh);
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const lift = mh * tile - H;   // the mask overhangs the top of the view by this much (device px)
+        for (const m of text.matchAll(/\S+/g)) {
+          const href = LINKS[m[0]];
+          if (!href) continue;
+          // one rect per line the word spans, in mask px: [left, top, right, bottom]
+          const rects = [];
+          for (let i = m.index, end = m.index + m[0].length; i < end;) {
+            const row = Math.floor(i / cols);
+            const stop = Math.min(end, (row + 1) * cols);
+            const left = x0 + (i % cols) * cell, top = y0 + row * step - step / 2;
+            rects.push([left, top, left + (stop - i) * cell, top + step]);
+            i = stop;
+          }
+          const on = () => { s.hi = rects; s.hover = true; };
+          const off = () => { if (s.hi === rects) s.hover = false; };
+          rects.forEach(([l, t, r, b], k) => {
+            const a = document.createElement("a");
+            a.href = href;
+            a.target = "_blank";
+            a.rel = "noopener";
+            a.textContent = m[0];
+            if (k) { a.tabIndex = -1; a.setAttribute("aria-hidden", "true"); }
+            Object.assign(a.style, {
+              left: `${(l * tile) / dpr}px`,
+              top: `${(t * tile - lift) / dpr}px`,
+              width: `${((r - l) * tile) / dpr}px`,
+              height: `${((b - t) * tile) / dpr}px`,
+            });
+            a.addEventListener("pointerenter", on);
+            a.addEventListener("pointerleave", off);
+            a.addEventListener("focus", on);
+            a.addEventListener("blur", off);
+            layer.appendChild(a);
+          });
+        }
       }
 
       // ---------- sizing ----------
@@ -527,7 +638,9 @@ void main() {
         const mw = Math.ceil(W / tile), mh = Math.ceil(H / tile);
         layoutGrid(mw, mh);
         TEXTS.forEach((text, i) => buildMask(still && params.has("notext") ? "" : text, maskTex[i], mw, mh));
+        if (!still) TEXTS.forEach((text, i) => buildLinks(text, linkLayers[i], mw, mh));
         bindMasks();
+        showLinks();
         gl.uniform2f(U.uRes, W, H);
         gl.uniform1f(U.uTile, tile);
         gl.uniform2f(U.uMaskRes, mw, mh);
@@ -544,7 +657,7 @@ void main() {
         mx: 0, my: 0, tmx: 0, tmy: 0,
         energy: 0, reveal: 0,
         scroll: 0, scrollS: 0, phase: 0, twist: 0,
-        px: null, py: null,
+        px: null, py: null, hover: false, hi: null, hiK: 0,
         glimpseAt: performance.now() + GLIMPSE.first,
       };
       const bump = e => {
@@ -681,6 +794,14 @@ void main() {
         gl.uniform1f(U.uPhase, phase);
         gl.uniform1f(U.uShift, Math.PI * mix(0.28, 1.0, r));
         gl.uniform1f(U.uReveal, r);
+
+        s.hiK += ((s.hover ? 1 : 0) - s.hiK) * (1 - Math.exp(-dt * (s.hover ? 14 : 5)));
+        if (s.hi) {
+          const hi = new Float32Array(16);
+          s.hi.slice(0, 4).forEach((rc, i) => hi.set(rc, i * 4));
+          gl.uniform4fv(U.uHi, hi);
+        }
+        gl.uniform1f(U.uHiK, s.hiK);
 
         if (msg.k < 1) {
           msg.k = Math.min(1, msg.k + dt / 0.9);

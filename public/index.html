@@ -514,6 +514,7 @@ void main() {
       // is whatever gives the largest letters with the longest message still fitting the view.
       const LH = 0.86;      // line step, em (Archivo Black caps ≈ 0.72em)
       const TRACK = 0.1;    // gap between letter cells, em
+      const HOVER_PAD = 2;  // mosaic tiles of dark margin around a hovered link's letters, every side
       const TEXTS = MESSAGES.map(m => m.trim().replace(/\s+/g, " "));
       let grid = null;
 
@@ -570,8 +571,9 @@ void main() {
       }
 
       // ---------- word links ----------
-      // Invisible anchors laid over the letter cells of any word in LINKS, one per line a word
-      // spans. Only the message being shown has its links switched on.
+      // Invisible anchors laid over any word in LINKS, one per line a word spans, each fitted to the
+      // letters' inked pixels plus HOVER_PAD tiles on every side. Reads the mask canvas, so it runs
+      // right after buildMask for the same text. Only the message being shown has its links on.
       const linkLayers = TEXTS.map(() => {
         const d = document.createElement("div");
         d.className = "links";
@@ -588,6 +590,20 @@ void main() {
         const { x0, y0 } = placement(text, mw, mh);
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
         const lift = mh * tile - H;   // the mask overhangs the top of the view by this much (device px)
+        const px = mctx.getImageData(0, 0, mw, mh).data;
+        // shrink a run of letter cells to its inked pixels (the shader's 0.5 threshold), then pad
+        const fit = ([l, t, r, b]) => {
+          let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
+          for (let y = Math.max(0, Math.floor(t)); y < Math.min(mh, Math.ceil(b)); y++) {
+            for (let x = Math.max(0, l); x < Math.min(mw, r); x++) {
+              if (px[(y * mw + x) * 4] < 128) continue;
+              x0 = Math.min(x0, x); x1 = Math.max(x1, x);
+              y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+            }
+          }
+          if (x1 < 0) return [l, t, r, b];
+          return [x0 - HOVER_PAD, y0 - HOVER_PAD, x1 + 1 + HOVER_PAD, y1 + 1 + HOVER_PAD];
+        };
         for (const m of text.matchAll(/\S+/g)) {
           const href = LINKS[m[0]];
           if (!href) continue;
@@ -597,7 +613,7 @@ void main() {
             const row = Math.floor(i / cols);
             const stop = Math.min(end, (row + 1) * cols);
             const left = x0 + (i % cols) * cell, top = y0 + row * step - step / 2;
-            rects.push([left, top, left + (stop - i) * cell, top + step]);
+            rects.push(fit([left, top, left + (stop - i) * cell, top + step]));
             i = stop;
           }
           const on = () => { s.hi = rects; s.hover = true; };
@@ -637,8 +653,10 @@ void main() {
         tile = Math.max(3, Math.round(tileCss * dpr));
         const mw = Math.ceil(W / tile), mh = Math.ceil(H / tile);
         layoutGrid(mw, mh);
-        TEXTS.forEach((text, i) => buildMask(still && params.has("notext") ? "" : text, maskTex[i], mw, mh));
-        if (!still) TEXTS.forEach((text, i) => buildLinks(text, linkLayers[i], mw, mh));
+        TEXTS.forEach((text, i) => {
+          buildMask(still && params.has("notext") ? "" : text, maskTex[i], mw, mh);
+          if (!still) buildLinks(text, linkLayers[i], mw, mh);
+        });
         bindMasks();
         showLinks();
         gl.uniform2f(U.uRes, W, H);
